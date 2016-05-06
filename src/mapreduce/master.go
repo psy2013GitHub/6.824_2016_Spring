@@ -14,6 +14,7 @@ type Master struct {
 
 	address         string
 	registerChannel chan string
+	idleWorkers chan string
 	doneChannel     chan bool
 	workers         []string // protected by the mutex
 
@@ -35,7 +36,10 @@ func (mr *Master) Register(args *RegisterArgs, _ *struct{}) error {
 	debug("Register: worker %s\n", args.Worker)
 	mr.workers = append(mr.workers, args.Worker)
 	go func() {
+		debug("worker %s start go to channel\n", args.Worker)
 		mr.registerChannel <- args.Worker
+		debug("worker %s go to channel done\n", args.Worker)
+
 	}()
 	return nil
 }
@@ -46,6 +50,7 @@ func newMaster(master string) (mr *Master) {
 	mr.address = master
 	mr.shutdown = make(chan struct{})
 	mr.registerChannel = make(chan string)
+	mr.idleWorkers = make(chan string)
 	mr.doneChannel = make(chan bool)
 	return
 }
@@ -60,10 +65,13 @@ func Sequential(jobName string, files []string, nreduce int,
 	go mr.run(jobName, files, nreduce, func(phase jobPhase) {
 		switch phase {
 		case mapPhase:
+			debug("mapPhase\n")
 			for i, f := range mr.files {
+				//debug("now %d %s\n", i, f)
 				doMap(mr.jobName, i, f, mr.nReduce, mapF)
 			}
 		case reducePhase:
+			debug("reducePhase\n")
 			for i := 0; i < mr.nReduce; i++ {
 				doReduce(mr.jobName, i, len(mr.files), reduceF)
 			}

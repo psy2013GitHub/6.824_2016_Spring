@@ -84,19 +84,22 @@ func (cfg *config) crash1(i int) {
 	// but copy old persister's content so that we always
 	// pass Make() the last persisted state.
 	if cfg.saved[i] != nil {
-		cfg.saved[i] = cfg.saved[i].Copy()
+		cfg.saved[i] = cfg.saved[i].Copy() // attention! `cfg.saved[i]` no more point to `cfg.rafts[i].persist`
 	}
 
 	rf := cfg.rafts[i]
 	if rf != nil {
 		cfg.mu.Unlock()
 		rf.Kill()
+		// test_raftlog := rf.persister.raftstate
+		// DPrintf("config.crash1[%v]: test raftlog:%v\n", i, test_raftlog)		
 		cfg.mu.Lock()
 		cfg.rafts[i] = nil
 	}
 
 	if cfg.saved[i] != nil {
 		raftlog := cfg.saved[i].ReadRaftState()
+		DPrintf("config.crash1[%v]: raftlog:%v\n", i, raftlog)
 		cfg.saved[i] = &Persister{}
 		cfg.saved[i].SaveRaftState(raftlog)
 	}
@@ -134,9 +137,12 @@ func (cfg *config) start1(i int) {
 	// pass Make() the last persisted state.
 	if cfg.saved[i] != nil {
 		cfg.saved[i] = cfg.saved[i].Copy()
+		DPrintf("config.start1[%v]: copy old inst persister, data: %v\n", i, cfg.saved[i].raftstate)
 	} else {
+		DPrintf("config.start1[%v]: init new persister\n", i)
 		cfg.saved[i] = MakePersister()
 	}
+	DPrintf("cfg.saved[%v]: %v\n", i, cfg.saved[i])
 
 	cfg.mu.Unlock()
 
@@ -144,6 +150,7 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
+			DPrintf("config start1 applyCh:%v\n", m)
 			err_msg := ""
 			if m.UseSnapshot {
 				// ignore the snapshot
@@ -161,7 +168,7 @@ func (cfg *config) start1(i int) {
 				cfg.mu.Unlock()
 
 				if m.Index > 1 && prevok == false {
-					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
+					err_msg = fmt.Sprintf("server %v apply out of order %v, prevok:%v", i, m.Index, prevok)
 				}
 			} else {
 				err_msg = fmt.Sprintf("committed command %v is not an int", m.Command)
@@ -191,6 +198,7 @@ func (cfg *config) start1(i int) {
 func (cfg *config) cleanup() {
 	for i := 0; i < len(cfg.rafts); i++ {
 		if cfg.rafts[i] != nil {
+			DPrintf("CONFIG cleanup: %v\n", i)
 			cfg.rafts[i].Kill()
 		}
 	}
@@ -210,6 +218,7 @@ func (cfg *config) connect(i int) {
 			cfg.net.Enable(endname, true)
 		}
 	}
+	DPrintf("CONNECT outgoing client-ends %v\n", i)
 
 	// incoming ClientEnds
 	for j := 0; j < cfg.n; j++ {
@@ -218,6 +227,7 @@ func (cfg *config) connect(i int) {
 			cfg.net.Enable(endname, true)
 		}
 	}
+	DPrintf("CONNECT incoming client-ends %v\n", i)
 }
 
 // detach server i from the net.
@@ -233,6 +243,7 @@ func (cfg *config) disconnect(i int) {
 			cfg.net.Enable(endname, false)
 		}
 	}
+	DPrintf("DISCONNECT outgoing client-ends %v\n", i)
 
 	// incoming ClientEnds
 	for j := 0; j < cfg.n; j++ {
@@ -241,6 +252,7 @@ func (cfg *config) disconnect(i int) {
 			cfg.net.Enable(endname, false)
 		}
 	}
+	DPrintf("DISCONNECT incoming client-ends %v\n", i)
 }
 
 func (cfg *config) rpcCount(server int) int {
@@ -264,6 +276,7 @@ func (cfg *config) checkOneLeader() int {
 		for i := 0; i < cfg.n; i++ {
 			if cfg.connected[i] {
 				if t, leader := cfg.rafts[i].GetState(); leader {
+					DPrintf("checkOneLeader: term: %v, server: %v as leader\n", t, i)
 					leaders[t] = append(leaders[t], i)
 				}
 			}
@@ -387,6 +400,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
+					DPrintf("config one: cmd %v sent to %v, index:%v\n", cmd, starts, index1)
 					index = index1
 					break
 				}
@@ -399,12 +413,14 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				DPrintf("config index:%v, nd:%v, cmd:%v\n", index, nd, cmd1)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
 						// and it was the command we submitted.
 						return index
 					}
+					DPrintf("config index:%v, nd:%v, cmd:%v\n Fail", index, nd, cmd1)
 				}
 				time.Sleep(20 * time.Millisecond)
 			}

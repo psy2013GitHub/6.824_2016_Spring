@@ -24,7 +24,7 @@ const (
 
 // Split in words
 func MapFunc(file string, value string) (res []KeyValue) {
-	debug("Map %v\n", value)
+	//debug("Map %v\n", value)
 	words := strings.Fields(value)
 	for _, w := range words {
 		kv := KeyValue{w, ""}
@@ -81,7 +81,7 @@ func check(t *testing.T, files []string) {
 		i++
 	}
 	if i != nNumber {
-		t.Fatalf("Expected %d lines in output\n", nNumber)
+		t.Fatalf("Expected %d lines in output, but now %d lines\n", nNumber, i)
 	}
 }
 
@@ -160,8 +160,11 @@ func TestSequentialMany(t *testing.T) {
 }
 
 func TestBasic(t *testing.T) {
-	mr := setup()
-	for i := 0; i < 2; i++ {
+	debug("begin setup\n")
+	mr := setup() // setup rpc master
+	debug("begin run worker\n")
+	for i := 0; i < 2; i++ { // run worker & let worker register
+		debug("%d\n", i)
 		go RunWorker(mr.address, port("worker"+strconv.Itoa(i)),
 			MapFunc, ReduceFunc, -1)
 	}
