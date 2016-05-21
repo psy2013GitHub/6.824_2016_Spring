@@ -127,15 +127,11 @@ func (rf *Raft) persist() {
 	e.Encode(rf.commitIndex)
 	e.Encode(rf.lastApplied)
 
-	// e.Encode(rf.nextIndex)
-	// e.Encode(rf.matchIndex)
-
 	data := w.Bytes()
 	if data==nil {
 		DPrintf("rf[%v].persist: nil data\n", rf.me)
 	}
 	rf.persister.SaveRaftState(data)
-	// DPrintf("rf[%v].persist: data:%v\n", rf.me, rf.persister.raftstate)
 }
 
 //
@@ -157,9 +153,6 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.votedFor)
 	d.Decode(&rf.commitIndex)
 	d.Decode(&rf.lastApplied)
-
-	// d.Decode(&rf.nextIndex)
-	// d.Decode(&rf.matchIndex)
 }
 
 //
@@ -201,10 +194,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		return
 	}
-	if rf.role == 0 {
-		rf.stayFollowerChan <- rf.currentTerm
-	}
-
 	if args.Term > rf.currentTerm {
 		DPrintf("vote: %v to %v: term: args.Term=%v > rf.currentTerm=%v\n", args.CandidateId, rf.me, args.Term, rf.currentTerm)
 		// DPrintf("AppendEntries: %v to %v: term: args.Term=%v > rf.currentTerm=%v\n", args.LeaderId, rf.me, args.Term, rf.currentTerm)
@@ -228,6 +217,9 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		if len(rf.log) == 0 || args.LastLogTerm > lastTerm || (lastTerm == args.LastLogTerm && args.LastLogIndex >= lastIdx) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
+			if rf.role == 0 { // if vote and as follower, then continue follower
+				rf.stayFollowerChan <- rf.currentTerm
+			}
 		}
 		DPrintf("RequestVote %v to %v, rf[%v].Term: %v, rf[%v].log: %v, voteGrant:%v\n", args.CandidateId, rf.me, rf.me, rf.currentTerm, rf.me, rf.log, reply.VoteGranted)
 	}
@@ -284,26 +276,30 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	if rf.isDead {
 		DPrintf("dead server: %v, ignore, reply:%v\n", rf.me, reply.Success)
 		return
-		DPrintf("you can't see me\n")
 	}
 
 	if args.Term < rf.currentTerm {
 		return
 	}
-	if atomic.LoadInt32(&(rf.role)) == 0 {
+	if rf.role == 0 {
 		rf.stayFollowerChan <- rf.currentTerm
 	}
+
+	if rf.role != 0 { // only become follower once
+		rf.role = 0
+		go rf.AsFollower()
+	}
+
 	if args.Term > rf.currentTerm {
 		DPrintf("AppendEntries: %v to %v: term: args.Term=%v > rf.currentTerm=%v\n", args.LeaderId, rf.me, args.Term, rf.currentTerm)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1 // voteFor tied with currentTerm
 		rf.persist()
 
-		if rf.role != 0 { // only become follower once
-			rf.role = 0
-			go rf.AsFollower()
-			// rf.toFollowerChan <- rf.currentTerm
-		}
+		// if rf.role != 0 { // only become follower once
+			// rf.role = 0
+			// go rf.AsFollower()
+		// }
 	}
 
 	if args.PrevLogIndex < -1 {
@@ -349,6 +345,9 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		rf.log = append(rf.log, args.Entries[idx2:]...)
 		unchanged = false
 	}
+	if !unchanged {
+		rf.persist()
+	}
 	DPrintf("%v to %v: AppendEntries, args.PrevLogIndex: %v, args.PrevLogTerm: %v update NextIndex: %v, idx1:%v, idx2:%v, rf[%v].log: %v, args.Entries: %v\n", args.LeaderId, rf.me, args.PrevLogIndex, args.PrevLogTerm, reply.NextIndex, idx1, idx2, rf.me, rf.log, args.Entries)
 	if len(rf.log) > 0 && unchanged && len(args.Entries) > 0 { // !!! len(rf.log)==0
 		reply.NextIndex = len(rf.log)
@@ -356,7 +355,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		return
 	}
 
-	rf.persist()
 
 	// 3.3, update commit index as min(args.LeaderCommit, lastIndex)
 	// verify cauz `Log Matching Property`
@@ -399,6 +397,7 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 //
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	index = len(rf.log) // the index that the command will appear at if it's ever committed.
 	term = rf.currentTerm // the current term
@@ -406,23 +405,14 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	isLeader = true
 	if rf.role != 2 { // if not leader, return immediately
 		isLeader = false
-		rf.mu.Unlock()
-		return
+		return index, term, isLeader
 	}
 
 	/* in case of `concurrent start`, append entry here*/
-	currEntry := LogEntry{Command: command, Term: rf.currentTerm}
+	currEntry := LogEntry{Command: command, Term: term}
 	rf.log = append(rf.log, currEntry)
-	rf.index2cnt[len(rf.log)-1]=1 // here, you must +1, or, testPersist1, cmd14 will fail
+	rf.index2cnt[index-1]=1 // here, you must +1, or, testPersist1, cmd14 will fail
 
-	rf.mu.Unlock()
-
-	// go func() {
-		// DPrintf("Leader %v sending cmd %v to rf.applyChan\n", rf.me, command)
-		// rf.requestChan <- command
-	// }()
-
-	// return immediately
 	return index, term, isLeader
 }
 
@@ -470,15 +460,10 @@ func (rf *Raft) KillImpl() {
 func (rf *Raft) Kill() {
 
 	rf.mu.Lock()
-	// DPrintf("Kill: %v save persister\n", rf.me)
-	// rf.persist()
-	// DPrintf("Kill: %v persister.raftdata: %v\n", rf.me, rf.persister.raftstate)
 	rf.isDead = true
 	rf.mu.Unlock()
 
-	// go func() {
 	rf.killSigChan <- 1
-	// }()
 }
 
 //
@@ -493,6 +478,19 @@ func (rf *Raft) Kill() {
 
 func (rf *Raft) AsFollower() {
 	DPrintf("server: %v as follower\n", rf.me)
+	stop := int32(0)
+	t := time.NewTimer(time.Duration(300+rand.Intn(200)) * time.Millisecond)
+	go func(stop_ptr *int32, t_ptr *time.Timer) {
+		for atomic.LoadInt32(stop_ptr) == 0 {
+			select {
+				case term := <-rf.stayFollowerChan:
+						DPrintf("Follower %v receives follower, term:%v, rf.currentTerm:%v\n", rf.me, term, rf.currentTerm)
+						DPrintf("Follower %v remains follower\n", rf.me)
+						t_ptr.Reset(time.Duration(300+rand.Intn(200)) * time.Millisecond)
+				}
+		}
+	}(&stop, t)
+
 	for rf.role == 0 {
 		select {
 		case <- rf.killSigChan:
@@ -500,22 +498,24 @@ func (rf *Raft) AsFollower() {
 			atomic.StoreInt32(&(rf.role), -1)
 			rf.KillImpl()
 			return
-		case term := <-rf.stayFollowerChan:
-			if rf.currentTerm == term {
-				DPrintf("Follower %v remains follower\n", rf.me)
-			}
-		case <- time.After(time.Duration(300 + rand.Intn(200)) * time.Millisecond): // 300-400ms as election timeout
+		// case term := <-rf.stayFollowerChan:
+			// DPrintf("Follower %v receives follower, term:%v, rf.currentTerm:%v\n", rf.me, term, rf.currentTerm)
+			// if rf.currentTerm <= term {
+			// DPrintf("Follower %v remains follower\n", rf.me)
+			// }
+		// case <- time.After(time.Duration(300 + rand.Intn(200)) * time.Millisecond): // 300-400ms as election timeout
+		case <- t.C:
 			DPrintf("server: %v timeout to candidate\n", rf.me)
 			rf.mu.Lock()
 			if rf.role == 0 {
-			// time.Sleep(time.Duration(rand.Intn(50)) time.Millisecond)
+				atomic.StoreInt32(&stop, 1)
 				rf.role = 1
 				go rf.AsCandidate()
 			}
 			rf.mu.Unlock()
-			return
 		} // handle request vote
 	}
+	return
 }
 
 func (rf *Raft) CandidateCallForVotes() {
@@ -534,6 +534,7 @@ func (rf *Raft) CandidateCallForVotes() {
 			lastLogTerm = rf.log[lastLogIndex].Term
 	}
 	if rf.role != 1 {
+		rf.mu.Unlock()
 		return
 	}
 	rf.mu.Unlock()
@@ -541,26 +542,23 @@ func (rf *Raft) CandidateCallForVotes() {
 
 	// LOOPPEER:
 	for i, _ := range rf.peers {
+		DPrintf("CandidateCallForVotes: %v to %v, Term:%v prepare\n", rf.me, i, args.Term)
 		if i == rf.me {
 			continue
 		}
 		go func(index int) {
 			reply := &RequestVoteReply{}
-			// rf.mu.Lock()
-			// if atomic.LoadInt32(&(rf.role)) != 1 {
-				// return
-			// }
-			// rf.mu.Unlock()
 			ok := rf.sendRequestVote(index, args, reply)
-			DPrintf("CandidateCallForVotes: %v to %v, Term:%v\n", rf.me, index, args.Term)
+			DPrintf("CandidateCallForVotes: %v to %v, rf.currentTerm:%v Term:%v ok:%v, reply.VoteGranted:%v\n", rf.me, index, rf.currentTerm, args.Term, ok, reply.VoteGranted)
+
 			if ok {
 				if reply.VoteGranted {
 					atomic.AddInt32(&voteCount, 1)
-					DPrintf("%v voteCount: %v\n", rf.me, voteCount)
+					DPrintf("%v Term:%v, voteCount: %v\n", rf.me, Term, voteCount)
 					if atomic.LoadInt32(&voteCount) >= majority {
-						atomic.StoreInt32(&voteCount, 0)
+						// atomic.StoreInt32(&voteCount, 0)
 						rf.mu.Lock()
-						if rf.role == 1 { // only once
+						if rf.role == 1 && Term == rf.currentTerm { // only once
 							 rf.role = 2
 						   go rf.AsLeader()
 						}
@@ -570,7 +568,7 @@ func (rf *Raft) CandidateCallForVotes() {
 				} else if (reply.Term > rf.currentTerm) { // receive greater Term
 					atomic.StoreInt32(&voteCount, 0)
 					rf.mu.Lock()
-					if rf.role == 1 { // only once
+					if rf.role == 1 && Term == rf.currentTerm { // only once
 						rf.role = 0
 						rf.currentTerm = reply.Term
 						rf.votedFor = -1
@@ -586,35 +584,20 @@ func (rf *Raft) CandidateCallForVotes() {
 			return // no matter whether `suc`, return
 		} (i)
 	}
-	// if voteCount >= majority {
-	// 	// atomic.StoreInt32(&voteCount, 0)
-	// 	rf.mu.Lock()
-	// 	if atomic.LoadInt32(&(rf.role)) == 1 { // only once
-	// 		 atomic.StoreInt32(&(rf.role), 2)
-	// 		 go rf.AsLeader()
-	// 	}
-	// 	rf.mu.Unlock()
-	// 	return
-	// }
-
 }
 
 func (rf *Raft) AsCandidate() {
 	DPrintf("server: %v as candidate\n", rf.me)
 	rf.mu.Lock()
 	if rf.role != 1 { // in case of dealing RequestVoteRPC and become 'follower'
+		rf.mu.Unlock()
 		return
 	}
 	rf.currentTerm++
 	rf.votedFor = rf.me // vote for myself
 	rf.persist()
 	rf.mu.Unlock()
-	// 1, go routine for votes counting
-	// voteCount := 1 // start as 1, cause vote for itself
-	// majority := len(rf.peers)/2 + 1
-	// stop := int32(0)
-	rf.CandidateCallForVotes()
-	// 2, run as candidates
+	go rf.CandidateCallForVotes()
 
 	for rf.role == 1 {
 		select {
@@ -623,7 +606,7 @@ func (rf *Raft) AsCandidate() {
 			rf.KillImpl()
 			atomic.StoreInt32(&(rf.role), -1)
 			return
-		case <- time.After(time.Duration(300+rand.Intn(200)) * time.Millisecond): // 300 - 400ms as election timeout
+		case <- time.After(time.Duration(150+rand.Intn(150)) * time.Millisecond): // 300 - 400ms as election timeout
 			rf.mu.Lock()
 		 	if rf.role == 1 {
 				DPrintf("candidate server: %v timeout, start another election\n", rf.me)
@@ -643,6 +626,7 @@ func (rf *Raft) LeaderSendAppendEntries() { // fixme
 	Term := rf.currentTerm
 	commitIndex := rf.commitIndex
 	if rf.role != 2 { // make sure still as leader, so `Term` be valid
+		rf.mu.Unlock()
 		return
 	}
 	rf.mu.Unlock()
@@ -694,16 +678,15 @@ func (rf *Raft) LeaderSendAppendEntries() { // fixme
 						ok := rf.sendAppendEntries(index, args, reply)
 						DPrintf("%v to %v, get reply:%v\n", rf.me, index, ok)
 
-						if !ok || reply == nil {
+						if !ok || reply == nil || rf.role!=2 || Term != rf.currentTerm {
 							return
 						}
 
 						rf.mu.Lock()
-						if rf.role == 2 {
+						if rf.role == 2 && Term == rf.currentTerm {
 							if reply.Success {
 								DPrintf("%v to %v, prevLogIndex: %v, prevLogTerm: %v entries: %v, reply Suc", rf.me, index, prevLogIndex, prevLogTerm, entries)
 								if entries != nil { // not heart-beat
-									// if atomic.LoadInt32(&(rf.role)) == 2 {
 										// rf.mu.Lock() // ONLY COMMIT CURRENT TERM
 										rf.nextIndex[index] = args.PrevLogIndex + len(args.Entries) + 1 // attention, +1 here
 										rf.matchIndex[index] = rf.nextIndex[index] - 1
@@ -713,12 +696,13 @@ func (rf *Raft) LeaderSendAppendEntries() { // fixme
 										if rf.log[idx].Term == rf.currentTerm && idx > rf.commitIndex {
 											_, ok := rf.index2cnt[idx]
 											if !ok {
-												rf.index2cnt[idx] = 1
+												rf.index2cnt[idx] = 2 // cause leader itself
 												DPrintf("Leader[%v]SendAppendEntries: init rf.index2cnt[%v]=%v, entries:%v, prevLogIndex:%v, prevLogTerm:%v\n", rf.me, idx, rf.index2cnt[idx], entries, prevLogIndex, prevLogTerm)
 											} else {
 												rf.index2cnt[idx]++
 												DPrintf("Leader[%v]SendAppendEntries: %v to %v ++rf.index2cnt[%v]=%v, entries:%v, prevLogIndex:%v, prevLogTerm:%v\n", rf.me, rf.me, index, idx, rf.index2cnt[idx], entries, prevLogIndex, prevLogTerm)
-												if rf.index2cnt[idx] > len(rf.peers)/2 {
+											}
+											if rf.index2cnt[idx] > len(rf.peers)/2 {
 													lastCommitIdx := rf.commitIndex
 													rf.commitIndex = idx
 													rf.persist()
@@ -730,27 +714,21 @@ func (rf *Raft) LeaderSendAppendEntries() { // fixme
 													}
 													// }()
 													DPrintf("LeaderSendAppendEntries: Update CommitIdx to %v\n", idx)
-												}
 											}
-										}
-									// }
-									// rf.mu.Unlock()
+									 }
 								}
-								// doneChan <- true
 								rf.mu.Unlock()
 								return
 							} else {
 								DPrintf("%v to %v, prevLogIndex:%v, prevLogTerm: %v reply.Term:%v, rf.currentTerm:%v\n", rf.me, index, prevLogIndex, prevLogTerm, reply.Term, rf.currentTerm)
-								// rf.mu.Lock()
-								if reply.Term > rf.currentTerm { // become follower only if more `up to date` response
+								if reply.Term > Term { // become follower only if more `up to date` response
 									DPrintf("%v to %v, prevLogIndex:%v, prevLogTerm: %v reply Fail: reply.Term:%v > rf.currentTerm:%v\n", rf.me, index, prevLogIndex, prevLogTerm, reply.Term, rf.currentTerm)
-									if rf.role == 2  { // only become follower once
+									if rf.role == 2 && Term == rf.currentTerm { // only become follower once
 										rf.role = 0
 										rf.currentTerm = reply.Term
 										rf.votedFor = -1
 										rf.persist()
 										go rf.AsFollower()
-										// doneChan <- true
 									}
 									rf.mu.Unlock()
 									return
@@ -765,12 +743,10 @@ func (rf *Raft) LeaderSendAppendEntries() { // fixme
 								// return
 							}
 						} else { // retry again
-							DPrintf("%v to %v, rpc fail\n", rf.me, index)
-							// doneChan <- true
+							DPrintf("%v to %v, no more leader\n", rf.me, index)
 							rf.mu.Unlock()
 							return // waite for next heartbeat
 						}
-						// rf.mu.Unlock()
 					}// end select
 				}
 		}(i)
@@ -788,7 +764,7 @@ func (rf *Raft) AsLeader() {
 	rf.mu.Unlock()
 	DPrintf("leader:%v init done\n", rf.me)
 	// stop := int32(0)
-	rf.LeaderSendAppendEntries()
+	go rf.LeaderSendAppendEntries()
 	for rf.role == 2 {
 		select {
 		case <- rf.killSigChan:
@@ -797,7 +773,7 @@ func (rf *Raft) AsLeader() {
 			rf.KillImpl()
 			return
 		// case term := <-rf.toFollowerChan: // to follower
-		case <-time.After(time.Duration(50 * len(rf.peers)) * time.Millisecond): // 20 - 30ms as election timeout
+		case <-time.After(time.Duration(50) * time.Millisecond): // 20 - 30ms as election timeout
 			rf.mu.Lock()
 			if rf.role == 2 {
 				DPrintf("leader select %v: timeout and send out heartbeat\n", rf.me)

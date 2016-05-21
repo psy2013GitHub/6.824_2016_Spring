@@ -182,7 +182,7 @@ func TestFailNoAgree(t *testing.T) {
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
 	}
-	if index2 < 1 || index2 > 2 { // fixme reset index 
+	if index2 < 1 || index2 > 2 { // fixme reset index
 		t.Fatalf("unexpected index %v", index2)
 	}
 
@@ -439,7 +439,7 @@ func TestPersist1(t *testing.T) {
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
 	cfg.one(14, servers-1)
-	DPrintf("TestPersist: 14 suc\n")	
+	DPrintf("TestPersist: 14 suc\n")
 	cfg.start1(leader2)
 	cfg.connect(leader2)
 
@@ -560,16 +560,20 @@ func TestFigure8(t *testing.T) {
 
 	fmt.Printf("Test: Figure 8 ...\n")
 
-	cfg.one(rand.Int(), 1)
+	tmp := rand.Int()
+	DPrintf("TestFigure8Unreliable: cfg.one: %v\n", tmp)
+	cfg.one(tmp, 1)
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
 		leader := -1
 		for i := 0; i < servers; i++ {
+			DPrintf("TestFigure8Unreliable: itser:%v, server:%v, cmd:%v\n", iters, i, tmp)
 			if cfg.rafts[i] != nil {
 				_, _, ok := cfg.rafts[i].Start(rand.Int())
 				if ok {
 					leader = i
+					DPrintf("TestFigure8Unreliable: itser:%v, leader:%v\n", iters, leader)
 				}
 			}
 		}
@@ -585,6 +589,7 @@ func TestFigure8(t *testing.T) {
 		if leader != -1 {
 			cfg.crash1(leader)
 			nup -= 1
+			DPrintf("TestFigure8Unreliable: itser:%v, disconnect:%v, --nup:%v\n", iters, leader, nup)
 		}
 
 		if nup < 3 {
@@ -593,6 +598,7 @@ func TestFigure8(t *testing.T) {
 				cfg.start1(s)
 				cfg.connect(s)
 				nup += 1
+				DPrintf("TestFigure8Unreliable: itser:%v, connect:%v, ++nup:%v\n", iters, s, nup)
 			}
 		}
 	}
@@ -601,11 +607,13 @@ func TestFigure8(t *testing.T) {
 		if cfg.rafts[i] == nil {
 			cfg.start1(i)
 			cfg.connect(i)
+			DPrintf("TestFigure8Unreliable: final connect:%v\n", i)
 		}
 	}
 
-	cfg.one(rand.Int(), servers)
-
+	tmp = rand.Int()
+	DPrintf("TestFigure8Unreliable: cfg.one: %v\n", tmp)
+	cfg.one(tmp, servers)
 	fmt.Printf("  ... Passed\n")
 }
 
